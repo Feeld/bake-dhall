@@ -1,0 +1,9 @@
+{ "name": "Some name",
+  "namespace": "Some namespace",
+  "image": "an/image:latest",
+  "port": 8080,
+  "replicas": 1,
+  "hosts": ["one", "two"],
+  "defaultHost": "foo",
+  "environment": []
+}
