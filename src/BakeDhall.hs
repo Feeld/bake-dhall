@@ -49,7 +49,7 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
     Right _   -> return ()
 
   let convertedExpression = convertToHomogeneousMaps conversion appliedExpr
-      conversion = Dhall.JSON.Conversion "key" "value"
+      conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
 
   case dhallToJSON convertedExpression of
     Left err -> throwIO err
