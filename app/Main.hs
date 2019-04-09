@@ -65,10 +65,10 @@ evaluateEvaluate EvaluateOptions{outputYamlPath,templateDirPath,jsonConfigPath,s
 
 isOuputProducingPath :: FilePath -> FilePath -> Bool
 isOuputProducingPath schemaFile file
-  | schemaFile==file                    = False
-isOuputProducingPath schemaFile ('_':_) = False
-isOuputProducingPath schemaFile ('.':_) = False
-isOuputProducingPath schemaFile s       = takeExtension s == ".dhall"
+  | schemaFile==file           = False
+isOuputProducingPath _ ('_':_) = False
+isOuputProducingPath _ ('.':_) = False
+isOuputProducingPath _ s       = takeExtension s == ".dhall"
 
 
 

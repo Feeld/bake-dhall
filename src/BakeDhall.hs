@@ -21,7 +21,7 @@ import           Dhall.Core                       (Chunks (..), Expr (..),
 import qualified Dhall.Import
 import           Dhall.JSON                       (Conversion (..),
                                                    convertToHomogeneousMaps,
-                                                   dhallToJSON)
+                                                   dhallToJSON, omitEmpty)
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
 import           Protolude
@@ -53,7 +53,7 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
 
   case dhallToJSON convertedExpression of
     Left err -> throwIO err
-    Right v  -> pure v
+    Right v  -> pure (omitEmpty v)
 
 exprFromFile
   :: FilePath
