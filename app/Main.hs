@@ -24,6 +24,6 @@ main = Dhall.detailed $ do
       values <- traverse (evalWithValue tyExpr cfgValue <=< exprFromFile) files
       forM_ (zip files values) $ \(f,v) -> do
         putStrLn @Text "---"
-        putStrLn @Text $ "# from: " <> show f
+        putStrLn @Text $ "# Source: " <> show f
         putStrLn (Data.Yaml.encode v)
     _ -> die "Usage: bake-dhall CONFIG_SIG CONFIG_JSON FILE_1 ... FILE_N"
