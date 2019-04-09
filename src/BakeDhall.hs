@@ -44,7 +44,7 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
 
   let appliedExpr = normalizeB64 (funExpr `App` cfgExpr)
 
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src (startingContext cfgTyExpr) appliedExpr  of
+  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext appliedExpr  of
     Left  err -> throwIO err
     Right _   -> return ()
 
@@ -100,10 +100,9 @@ normalizeB64 = normalizeWith (pure . b64normalizer)
     Nothing
 
 startingContext
-  :: ExprX -> Dhall.Context.Context ExprX
-startingContext x = Dhall.Context.empty
-                  & Dhall.Context.insert "Text/toBase64" textToTextType
-                  & Dhall.Context.insert "Text/fromBase64" textToTextType
-                  & Dhall.Context.insert "Config" x
+  :: Dhall.Context.Context ExprX
+startingContext = Dhall.Context.empty
+                & Dhall.Context.insert "Text/toBase64" textToTextType
+                & Dhall.Context.insert "Text/fromBase64" textToTextType
   where
   textToTextType = Pi "_" Text Text
