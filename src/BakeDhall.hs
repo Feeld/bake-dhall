@@ -7,25 +7,27 @@
 
 module BakeDhall (ExprX, exprFromFile, exprFromText, exprFromText', eval, evalWithValue) where
 
-import           JsonToDhall (defaultConversion, dhallFromJSON)
+import           JsonToDhall                      (defaultConversion,
+                                                   dhallFromJSON)
 
-import           Control.Lens
+import           Control.Lens                     hiding (Const)
 import qualified Control.Monad.Trans.State.Strict as StrictState
 import           Data.Aeson
-import           Data.Yaml
 import qualified Data.ByteString.Base64           as B64
 import qualified Data.Text.IO
+import           Data.Yaml
 import qualified Dhall.Binary
 import qualified Dhall.Context
-import           Dhall.Core                       (Chunks (..), Expr (..), denote, internalError,
-                                                   normalizeWith)
+import           Dhall.Core                       (Chunks (..), Const (..),
+                                                   Expr (..), denote,
+                                                   internalError, normalizeWith)
 import qualified Dhall.Import
 import           Dhall.JSON                       (Conversion (..),
                                                    convertToHomogeneousMaps,
                                                    dhallToJSON, omitEmpty)
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
-import           Protolude
+import           Protolude                        hiding (Const)
 import           System.FilePath                  (takeDirectory)
 import           System.IO.Error                  (userError)
 
@@ -103,18 +105,22 @@ normalizeBake = normalizeWith (pure . normalizer)
     Just (TextLit (Chunks [] (toS . B64.encode . toS $ x)))
 
   normalizer (App (Var "Text/fromBase64") (normalizeBake -> TextLit (Chunks [] x))) =
-    Just (TextLit (Chunks [] (toS . B64.decodeLenient . toS $ x)))
+    case B64.decode (toS x) of
+      Right s -> Just (Some (TextLit (Chunks [] (toS s))))
+      Left _ -> Just (None `App` Text)
 
-  normalizer (App (App (Var "Text/fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
-    exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
+  normalizer (App (App (Var "fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) = do
+    expr <- exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
+    pure $ Annot expr tyExpr
 
-  normalizer (App (Var "Text/toJSON") expr) =
+  normalizer (App (App (Var "toJSON") _) expr) =
     serializeValueWith (toS . Data.Aeson.encode) expr
 
-  normalizer (App (App (Var "Text/fromYAML") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
-    exprFromValue tyExpr =<< either (const Nothing) Just (Data.Yaml.decodeEither' (toS str))
+  normalizer (App (App (Var "fromYAML") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) = do
+    expr <- exprFromValue tyExpr =<< either (const Nothing) Just (Data.Yaml.decodeEither' (toS str))
+    pure $ Annot expr tyExpr
 
-  normalizer (App (Var "Text/toYAML") expr) =
+  normalizer (App (App (Var "toYAML") _) expr) =
     serializeValueWith (toS . Data.Yaml.encode) expr
 
   normalizer _ =
@@ -124,13 +130,13 @@ normalizeBake = normalizeWith (pure . normalizer)
     let convertedExpression = convertToHomogeneousMaps conversion (const anX <$> expr)
         conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
     in case dhallToJSON convertedExpression of
-      Left _ -> Nothing
-      Right v  -> Just (TextLit (Chunks [] (fun (omitEmpty v))))
+      Left _  -> Nothing
+      Right v -> Just (TextLit (Chunks [] (fun (omitEmpty v))))
 
   exprFromValue tyExpr value =
     case dhallFromJSON defaultConversion (const anX <$> denote tyExpr) value of
-      Right x -> Just (Dhall.TypeCheck.absurd <$> denote x)
-      Left _  -> Nothing
+      Right x -> Just (Dhall.TypeCheck.absurd <$> denote (Some x))
+      Left _  -> Just (None `App` tyExpr)
 
   anX = Dhall.TypeCheck.X (internalError "absurd")
 
@@ -138,6 +144,13 @@ startingContext
   :: Dhall.Context.Context ExprX
 startingContext = Dhall.Context.empty
                 & Dhall.Context.insert "Text/toBase64" textToTextType
-                & Dhall.Context.insert "Text/fromBase64" textToTextType
+                & Dhall.Context.insert "Text/fromBase64" fromBase64Type
+                & Dhall.Context.insert "fromJSON" deserializerType
+                & Dhall.Context.insert "fromYAML" deserializerType
+                & Dhall.Context.insert "toJSON" serializerType
+                & Dhall.Context.insert "toYAML" serializerType
   where
   textToTextType = Pi "_" Text Text
+  fromBase64Type = Pi "_" Text (Optional `App` Text)
+  deserializerType = Pi "x" (Const Type) (Pi "_" Text (Optional `App` Var "x"))
+  serializerType = Pi "x" (Const Type) (Pi "_" (Var "x") Text)
