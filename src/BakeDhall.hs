@@ -72,11 +72,11 @@ import           System.IO.Error                       (userError)
 -- "[6,5]"
 --
 -- Can decode a well-typed json
--- >>> evalTest "fromJSON {name:Text} ./examples/myConfig.json as Text"
--- {"name":"foo"}
+-- >>> evalTest "fromJSON {name:Text} ./examples/sampleConfig.json as Text"
+-- {"name":"Some name"}
 --
 -- A non-well-typed json produces a json null
--- >>> evalTest "fromJSON {name:Natural} ./examples/myConfig.json as Text"
+-- >>> evalTest "fromJSON {name:Natural} ./examples/sampleConfig.json as Text"
 -- null
 --
 -- Can encode into yaml
