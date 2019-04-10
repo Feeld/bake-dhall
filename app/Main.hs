@@ -74,23 +74,24 @@ evaluateTemplate TemplateOptions{outputYamlPath,templateDirPath,jsonConfigPath} 
         hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
 
 evaluateUnpack :: UnpackOptions -> IO ()
-evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} = do
-  eEntries <- Tar.foldEntries (\a -> fmap (a:)) (pure mempty) Left
-          <$> withInputFileOrStdin inputPackagePath (fmap (Tar.read . BZip.decompress) . LBS.hGetContents)
-  entries <- either (throwIO . userError . show) pure eEntries
-  schemaEntry <- maybe (throwIO (userError "Config.yaml not found in archive")) pure
-                (List.find ((==schemaFilename) . Tar.entryPath) entries)
-  schemaExpr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText schemaEntry)
-  cfgValue <- withInputFileOrStdin jsonConfigPath $ \inH ->
-    either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents inH)
-  withOutputFileOrStdout outputYamlPath $ \outH ->
-    forM_ (sortBy (compare `on` Tar.entryPath) entries) $ \entry -> do
-      let pth = Tar.entryPath entry
-      when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
-        hPutStrLn stderr $ "Processing " <> pth
-        expr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText entry)
-        yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
-        hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
+evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
+  withInputFileOrStdin inputPackagePath $ \inH -> do
+    eEntries <- Tar.foldEntries (\a -> fmap (a:)) (pure mempty) Left
+              . Tar.read . BZip.decompress
+            <$> LBS.hGetContents inH
+    entries <- either (throwIO . userError . show) pure eEntries
+    schemaEntry <- maybe (throwIO (userError "Config.yaml not found in archive")) pure
+                  (List.find ((==schemaFilename) . Tar.entryPath) entries)
+    schemaExpr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText schemaEntry)
+    cfgValue <- withInputFileOrStdin jsonConfigPath $ \cfgH ->
+      either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents cfgH)
+    withOutputFileOrStdout outputYamlPath $ \outH ->
+      forM_ (sortBy (compare `on` Tar.entryPath) entries) $ \entry -> do
+        let pth = Tar.entryPath entry
+        when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
+          expr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText entry)
+          yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
+          hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
 
   where
   entryText :: Tar.Entry -> IO Text

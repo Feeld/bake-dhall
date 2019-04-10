@@ -1,9 +1,28 @@
-let config =
-  https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/69c85131d17816889311905aaacfcb621dcaf59c/api/Service/default
-  //
-  { name = "nginx"
-  , containerPort = 80
-  }
+let types = ./types
+let defaults = ./defaults
+let Config = ./Config.dhall
 
-in \(_ : Config) ->
-  https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/69c85131d17816889311905aaacfcb621dcaf59c/api/Service/mkService config
+let kv = (./Prelude).JSON.keyText
+
+let spec =
+      { selector =
+          [ kv "app" "nginx" ]
+      , type =
+          Some "NodePort"
+      , ports =
+          [     defaults.ServicePort
+            //  { targetPort = Some (types.IntOrString.Int 80), port = 80 }
+          ]
+      }
+
+let service
+    : types.Service
+    =     defaults.Service
+      //  { metadata =
+                  defaults.ObjectMeta
+              //  { name = "nginx", labels = [ kv "app" "nginx" ] }
+          , spec =
+              Some (defaults.ServiceSpec // spec)
+          }
+
+in \(_ : Config) -> service
