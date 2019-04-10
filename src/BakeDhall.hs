@@ -106,9 +106,7 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
 
   let appliedExpr = normalizeBake (funExpr `App` cfgExpr)
 
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext appliedExpr  of
-    Left  err -> throwIO err
-    Right _   -> return ()
+  typeCheck appliedExpr
 
   let convertedExpression = convertToHomogeneousMaps conversion appliedExpr
       conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
@@ -156,7 +154,16 @@ exprFromText' rootDirectory filename text = do
 
   let status = Dhall.Import.emptyStatus rootDirectory
 
-  normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  resolved <- StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  typeCheck resolved
+  pure $ normalizeBake resolved
+
+
+typeCheck :: MonadIO m => ExprX -> m ()
+typeCheck expr =
+  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext expr of
+    Left  err -> throwIO err
+    Right _   -> return ()
 
 exprFromTextPure
   :: Text
