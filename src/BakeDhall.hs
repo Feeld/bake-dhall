@@ -5,32 +5,45 @@
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE ViewPatterns          #-}
 
-module BakeDhall (exprFromFile, exprFromText, exprFromText', eval, evalWithValue, evalTest) where
+module BakeDhall (
+  ExprX
+, exprFromFile
+, exprFromText
+, exprFromText'
+, exprFromTextPure
+, eval
+, evalWithValue
+, evalTest
+, renderExpr
+) where
 
 
-import           JsonToDhall                      (defaultConversion,
-                                                   dhallFromJSON)
+import           JsonToDhall                           (defaultConversion,
+                                                        dhallFromJSON)
 
-import           Control.Lens                     hiding (Const)
-import qualified Control.Monad.Trans.State.Strict as StrictState
+import           Control.Lens                          hiding (Const)
+import qualified Control.Monad.Trans.State.Strict      as StrictState
 import           Data.Aeson
-import qualified Data.ByteString.Base64           as B64
+import qualified Data.ByteString.Base64                as B64
 import qualified Data.Text.IO
+import qualified Data.Text.Prettyprint.Doc             as Pretty
+import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
 import           Data.Yaml
 import qualified Dhall.Binary
 import qualified Dhall.Context
-import           Dhall.Core                       (Chunks (..), Const (..),
-                                                   Expr (..), denote,
-                                                   internalError, normalizeWith)
+import           Dhall.Core                            (Chunks (..), Const (..),
+                                                        Expr (..), denote,
+                                                        internalError,
+                                                        normalizeWith)
 import qualified Dhall.Import
-import           Dhall.JSON                       (Conversion (..),
-                                                   convertToHomogeneousMaps,
-                                                   dhallToJSON, omitEmpty)
+import           Dhall.JSON                            (Conversion (..),
+                                                        convertToHomogeneousMaps,
+                                                        dhallToJSON, omitEmpty)
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
-import           Protolude                        hiding (Const)
-import           System.FilePath                  (takeDirectory)
-import           System.IO.Error                  (userError)
+import           Protolude                             hiding (Const)
+import           System.FilePath                       (takeDirectory)
+import           System.IO.Error                       (userError)
 
 -- This module exports functions to evaluate dhall expressions with builtin
 -- json/yaml support
@@ -129,7 +142,7 @@ exprFromFile path = withFile path ReadMode $
   exprFromText' (takeDirectory path) path <=< Data.Text.IO.hGetContents
 
 exprFromText :: Text -> IO ExprX
-exprFromText = exprFromText' "." "str"
+exprFromText = exprFromText' "." "(string)"
 
 exprFromText'
   :: FilePath
@@ -145,6 +158,21 @@ exprFromText' rootDirectory filename text = do
 
   normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
 
+exprFromTextPure
+  :: Text
+  -> Either Text ExprX
+exprFromTextPure text = do
+  expression <- case Dhall.Parser.exprFromText "(string)" text of
+    Left  err  -> Left (show err)
+    Right expr -> Right expr
+
+  normal <- normalizeBake
+        <$> traverse (const (Left "Import resolution disabled")) expression
+  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext normal of
+    Left  err -> Left (show err)
+    Right _   -> Right normal
+
+
 normalizeBake :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a
 normalizeBake = normalizeWith (pure . normalizer)
   where
@@ -156,7 +184,7 @@ normalizeBake = normalizeWith (pure . normalizer)
   normalizer (App (Var "Text/fromBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     case B64.decode (toS x) of
       Right s -> Just (Some (TextLit (Chunks [] (toS s))))
-      Left _ -> Just (None `App` Text)
+      Left _  -> Just (None `App` Text)
 
   normalizer (App (App (Var "fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
     exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
@@ -201,3 +229,12 @@ startingContext = Dhall.Context.empty
   fromBase64Type = Pi "_" Text (Optional `App` Text)
   deserializerType = Pi "x" (Const Type) (Pi "_" Text (Optional `App` Var "x"))
   serializerType = Pi "x" (Const Type) (Pi "_" (Var "x") Text)
+
+
+renderExpr :: ExprX -> Text
+renderExpr = Pretty.renderStrict . Pretty.layoutPretty opts . Pretty.pretty
+  where
+  opts :: Pretty.LayoutOptions
+  opts =
+    Pretty.defaultLayoutOptions
+      { Pretty.layoutPageWidth = Pretty.AvailablePerLine 80 1.0 }
