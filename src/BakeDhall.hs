@@ -5,7 +5,8 @@
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE ViewPatterns          #-}
 
-module BakeDhall (ExprX, exprFromFile, exprFromText, exprFromText', eval, evalWithValue) where
+module BakeDhall (exprFromFile, exprFromText, exprFromText', eval, evalWithValue, evalTest) where
+
 
 import           JsonToDhall                      (defaultConversion,
                                                    dhallFromJSON)
@@ -31,6 +32,47 @@ import           Protolude                        hiding (Const)
 import           System.FilePath                  (takeDirectory)
 import           System.IO.Error                  (userError)
 
+-- This module exports functions to evaluate dhall expressions with builtin
+-- json/yaml support
+--
+-- $
+-- >>> :set -XOverloadedStrings
+--
+-- Can evaluate a simple expression
+-- >>> evalTest "1 + 2"
+-- 3
+--
+-- Can convert a string to base64
+-- >>> evalTest "Text/toBase64 \"foobar\""
+-- "Zm9vYmFy"
+--
+-- Can decode a well-formed base64 string
+-- >>> evalTest "Text/fromBase64 \"Zm9vYmFy\""
+-- "foobar"
+--
+-- A non-well-formed base64 string produces a json null
+-- >>> evalTest "Text/fromBase64 \"Zm9mFy\""
+-- null
+--
+-- Can decode a well-typed json
+-- >>> evalTest "fromJSON {name:Text} ./examples/myConfig.json as Text"
+-- {"name":"foo"}
+--
+-- A non-well-typed json produces null
+-- >>> evalTest "fromJSON {name:Natural} ./examples/myConfig.json as Text"
+-- null
+--
+-- Can encode into yaml
+-- >>> evalTest "toYAML (List Natural) [1 + 2 + 3, 5]"
+-- "- 6\n- 5\n"
+--
+-- Can decode well-typed yaml
+-- >>> evalTest "fromYAML (List Natural) \"- 6\\n- 5\\n\""
+-- [6,5]
+--
+-- Non well-typed yaml produces null
+-- >>> evalTest "fromYAML (List (List Text)) \"- 6\\n- 5\\n\""
+-- null
 
 
 type ExprX = Expr Dhall.Parser.Src Dhall.TypeCheck.X
@@ -71,6 +113,9 @@ eval expr = do
     Left err -> throwIO err
     Right v  -> pure (omitEmpty v)
 
+evalTest :: Text -> IO ()
+evalTest = putStrLn <=< fmap Data.Aeson.encode . eval <=< exprFromText
+
 exprFromFile
   :: FilePath
   -> IO ExprX
@@ -109,16 +154,14 @@ normalizeBake = normalizeWith (pure . normalizer)
       Right s -> Just (Some (TextLit (Chunks [] (toS s))))
       Left _ -> Just (None `App` Text)
 
-  normalizer (App (App (Var "fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) = do
-    expr <- exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
-    pure $ Annot expr tyExpr
+  normalizer (App (App (Var "fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
+    exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
 
   normalizer (App (App (Var "toJSON") _) expr) =
     serializeValueWith (toS . Data.Aeson.encode) expr
 
-  normalizer (App (App (Var "fromYAML") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) = do
-    expr <- exprFromValue tyExpr =<< either (const Nothing) Just (Data.Yaml.decodeEither' (toS str))
-    pure $ Annot expr tyExpr
+  normalizer (App (App (Var "fromYAML") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
+    exprFromValue tyExpr =<< either (const Nothing) Just (Data.Yaml.decodeEither' (toS str))
 
   normalizer (App (App (Var "toYAML") _) expr) =
     serializeValueWith (toS . Data.Yaml.encode) expr
