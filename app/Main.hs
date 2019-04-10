@@ -7,7 +7,7 @@
 
 module Main (main) where
 
-import           BakeDhall                  (evalWithValue, exprFromFile)
+import           BakeDhall                  (eval, evalWithValue, exprFromFile)
 
 import           Data.Aeson
 import qualified Data.ByteString.Lazy       as LBS
@@ -26,7 +26,8 @@ main = Dhall.detailed $ evaluateCommand =<< parseCommand
 data Command
   = Export   ExportOptions
   | Import   ImportOptions
-  | Evaluate EvaluateOptions
+  | Template TemplateOptions
+  | Evaluate
 
 data ImportOptions = ImportOptions
   { outputTemplateDirPath :: FilePath
@@ -38,18 +39,20 @@ data ExportOptions = ExportOptions
   , inputTemplateDirPath :: FilePath
   }
 
-data EvaluateOptions = EvaluateOptions
+data TemplateOptions = TemplateOptions
   { outputYamlPath  :: FilePath
   , templateDirPath :: FilePath
   , jsonConfigPath  :: FilePath
   , schemaFilename  :: FilePath
   }
 
-evaluateCommand :: Command -> IO ()
-evaluateCommand (Evaluate opts) = evaluateEvaluate opts
 
-evaluateEvaluate :: EvaluateOptions -> IO ()
-evaluateEvaluate EvaluateOptions{outputYamlPath,templateDirPath,jsonConfigPath,schemaFilename} = do
+evaluateCommand :: Command -> IO ()
+evaluateCommand (Template opts) = evaluateTemplate opts
+evaluateCommand Evaluate        = evaluateStdin
+
+evaluateTemplate :: TemplateOptions -> IO ()
+evaluateTemplate TemplateOptions{outputYamlPath,templateDirPath,jsonConfigPath,schemaFilename} = do
   schemaExpr <- exprFromFile $ templateDirPath </> schemaFilename
   cfgValue <- withInputFileOrStdin jsonConfigPath $ \inH ->
     either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents inH)
@@ -61,6 +64,10 @@ evaluateEvaluate EvaluateOptions{outputYamlPath,templateDirPath,jsonConfigPath,s
         yaml <- Data.Yaml.encode
           <$> (evalWithValue schemaExpr cfgValue =<< exprFromFile pth)
         hPutStrLn outH $ "---\n# Source: " <> toS pth <> "\n" <> yaml
+
+evaluateStdin :: IO ()
+evaluateStdin =
+  putStrLn . Data.Yaml.encode =<< eval =<< exprFromFile "-"
 
 
 isOuputProducingPath :: FilePath -> FilePath -> Bool
@@ -111,10 +118,10 @@ parseCommand =
           )
       )
     addCommand
-      "evaluate"
+      "template"
       "Evaluate a dhall template dir"
-      Evaluate
-      ( EvaluateOptions
+      Template
+      ( TemplateOptions
         <$>  strOption
           (  help "Output yaml file"
           <> long "output"
@@ -144,6 +151,11 @@ parseCommand =
           <> showDefault
           )
       )
+    addCommand
+      "eval"
+      "Evaluate stdin"
+      (const Evaluate)
+      (pure ())
   where
   header = "bake-dhall"
   description = "describe me"

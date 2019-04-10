@@ -5,18 +5,19 @@
 {-# LANGUAGE TypeApplications      #-}
 {-# LANGUAGE ViewPatterns          #-}
 
-module BakeDhall (ExprX, exprFromFile, exprFromText, exprFromText', evalWithValue) where
+module BakeDhall (ExprX, exprFromFile, exprFromText, exprFromText', eval, evalWithValue) where
 
 import           JsonToDhall (defaultConversion, dhallFromJSON)
 
 import           Control.Lens
 import qualified Control.Monad.Trans.State.Strict as StrictState
 import           Data.Aeson
+import           Data.Yaml
 import qualified Data.ByteString.Base64           as B64
 import qualified Data.Text.IO
 import qualified Dhall.Binary
 import qualified Dhall.Context
-import           Dhall.Core                       (Chunks (..), Expr (..),
+import           Dhall.Core                       (Chunks (..), Expr (..), denote, internalError,
                                                    normalizeWith)
 import qualified Dhall.Import
 import           Dhall.JSON                       (Conversion (..),
@@ -42,7 +43,7 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
     Right x -> pure x
     Left e  -> throwIO $ userError $ show e
 
-  let appliedExpr = normalizeB64 (funExpr `App` cfgExpr)
+  let appliedExpr = normalizeBake (funExpr `App` cfgExpr)
 
   case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext appliedExpr  of
     Left  err -> throwIO err
@@ -55,21 +56,26 @@ evalWithValue cfgTyExpr cfgValue funExpr = do
     Left err -> throwIO err
     Right v  -> pure (omitEmpty v)
 
+eval :: ExprX -> IO Value
+eval expr = do
+  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext expr of
+    Left  err -> throwIO err
+    Right _   -> return ()
+
+  let convertedExpression = convertToHomogeneousMaps conversion expr
+      conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
+
+  case dhallToJSON convertedExpression of
+    Left err -> throwIO err
+    Right v  -> pure (omitEmpty v)
+
 exprFromFile
   :: FilePath
   -> IO ExprX
-exprFromFile path = withFile' $
-  exprFromText' rootDirectory filename <=< Data.Text.IO.hGetContents
-  where
-  filename
-    | path == "-" = "(stdin)"
-    | otherwise   = path
-  rootDirectory
-    | path == "-" = "."
-    | otherwise   = takeDirectory path
-  withFile'
-    | path == "-" = \f -> f stdin
-    | otherwise   = withFile path ReadMode
+exprFromFile "-" =
+  exprFromText' "." "(stdin)" =<< Data.Text.IO.hGetContents stdin
+exprFromFile path = withFile path ReadMode $
+  exprFromText' (takeDirectory path) path <=< Data.Text.IO.hGetContents
 
 exprFromText :: Text -> IO ExprX
 exprFromText = exprFromText' "." "str"
@@ -86,18 +92,47 @@ exprFromText' rootDirectory filename text = do
 
   let status = Dhall.Import.emptyStatus rootDirectory
 
-  normalizeB64 <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
 
-normalizeB64 :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a
-normalizeB64 = normalizeWith (pure . b64normalizer)
+normalizeBake :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a
+normalizeBake = normalizeWith (pure . normalizer)
   where
-  b64normalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
-  b64normalizer (App (Var "Text/toBase64") (normalizeB64 -> TextLit (Chunks [] x))) =
+  normalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
+
+  normalizer (App (Var "Text/toBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     Just (TextLit (Chunks [] (toS . B64.encode . toS $ x)))
-  b64normalizer (App (Var "Text/fromBase64") (normalizeB64 -> TextLit (Chunks [] x))) =
+
+  normalizer (App (Var "Text/fromBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     Just (TextLit (Chunks [] (toS . B64.decodeLenient . toS $ x)))
-  b64normalizer _ =
+
+  normalizer (App (App (Var "Text/fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
+    exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
+
+  normalizer (App (Var "Text/toJSON") expr) =
+    serializeValueWith (toS . Data.Aeson.encode) expr
+
+  normalizer (App (App (Var "Text/fromYAML") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
+    exprFromValue tyExpr =<< either (const Nothing) Just (Data.Yaml.decodeEither' (toS str))
+
+  normalizer (App (Var "Text/toYAML") expr) =
+    serializeValueWith (toS . Data.Yaml.encode) expr
+
+  normalizer _ =
     Nothing
+
+  serializeValueWith fun expr =
+    let convertedExpression = convertToHomogeneousMaps conversion (const anX <$> expr)
+        conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
+    in case dhallToJSON convertedExpression of
+      Left _ -> Nothing
+      Right v  -> Just (TextLit (Chunks [] (fun (omitEmpty v))))
+
+  exprFromValue tyExpr value =
+    case dhallFromJSON defaultConversion (const anX <$> denote tyExpr) value of
+      Right x -> Just (Dhall.TypeCheck.absurd <$> denote x)
+      Left _  -> Nothing
+
+  anX = Dhall.TypeCheck.X (internalError "absurd")
 
 startingContext
   :: Dhall.Context.Context ExprX
