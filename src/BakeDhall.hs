@@ -54,11 +54,15 @@ import           System.IO.Error                  (userError)
 -- >>> evalTest "Text/fromBase64 \"Zm9mFy\""
 -- null
 --
+-- Can encode into json
+-- >>> evalTest "toJSON (List Natural) [1 + 2 + 3, 5]"
+-- "[6,5]"
+--
 -- Can decode a well-typed json
 -- >>> evalTest "fromJSON {name:Text} ./examples/myConfig.json as Text"
 -- {"name":"foo"}
 --
--- A non-well-typed json produces null
+-- A non-well-typed json produces a json null
 -- >>> evalTest "fromJSON {name:Natural} ./examples/myConfig.json as Text"
 -- null
 --
@@ -66,11 +70,11 @@ import           System.IO.Error                  (userError)
 -- >>> evalTest "toYAML (List Natural) [1 + 2 + 3, 5]"
 -- "- 6\n- 5\n"
 --
--- Can decode well-typed yaml
+-- Can decode a well-typed yaml
 -- >>> evalTest "fromYAML (List Natural) \"- 6\\n- 5\\n\""
 -- [6,5]
 --
--- Non well-typed yaml produces null
+-- A non well-typed yaml produces a json null
 -- >>> evalTest "fromYAML (List (List Text)) \"- 6\\n- 5\\n\""
 -- null
 
