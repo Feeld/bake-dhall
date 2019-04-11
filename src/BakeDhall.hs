@@ -168,10 +168,11 @@ exprFromText' rootDirectory filename text = do
 
   let status = Dhall.Import.emptyStatus        rootDirectory
              & Dhall.Import.normalizer      .~ ReifiedNormalizer (pure . bakeNormalizer)
+             & Dhall.Import.resolver        %~ (\old imp -> replaceBuiltinModules <$> old imp)
              & Dhall.Import.startingContext .~ startingContext
 
 
-  resolved <- replaceBuiltinModules . normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  resolved <- StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
   typeCheck resolved
   pure resolved
 

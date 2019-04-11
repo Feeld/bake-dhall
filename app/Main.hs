@@ -8,7 +8,7 @@
 module Main (main) where
 
 import           BakeDhall                  (ExprX, eval, evalWithValue,
-                                             exprFromFile, exprFromFileNoBakeNormalize, exprFromBinary)
+                                             exprFromFile, exprFromBinary)
 
 import qualified Codec.Archive.Tar          as Tar
 import qualified Codec.Archive.Tar.Entry    as Tar
@@ -108,7 +108,7 @@ entryBytes e = throwIO $ userError $ "Expected " <> Tar.entryPath e <> " to be a
 evaluatePack :: PackOptions -> IO ()
 evaluatePack PackOptions{outputPackagePath,templateDirPath} = do
   entries <- forM [indexPath, schemaPath] $ \pth -> do
-    importedAndNormalized <- exprFromFileNoBakeNormalize pth
+    importedAndNormalized <- exprFromFile pth
     tarPath <- either (throwIO . userError) pure (Tar.toTarPath False (takeFileName pth))
     pure $ Tar.fileEntry tarPath
          $ Codec.Serialise.serialise
