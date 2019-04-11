@@ -1,0 +1,1 @@
+https://raw.githubusercontent.com/dhall-lang/dhall-kubernetes/a5355645cbe9e9913f87128953433aeb8e0e31f5/types.dhall sha256:29d8c4387540826a68775e9439e8d00f226d440a83dedf80ff877c612fa524a2

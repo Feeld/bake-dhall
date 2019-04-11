@@ -8,6 +8,7 @@
 module BakeDhall (
   ExprX
 , exprFromFile
+, exprFromFileNoBakeNormalize
 , exprFromText
 , exprFromText'
 , eval
@@ -17,6 +18,7 @@ module BakeDhall (
 ) where
 
 
+import           EmbeddedModules
 import           JsonToDhall                           (defaultConversion,
                                                         dhallFromJSON)
 
@@ -30,11 +32,10 @@ import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
 import           Data.Yaml
 import qualified Dhall.Binary
 import qualified Dhall.Context
-import           Dhall.Core                            (Chunks (..), Const (..),
+import           Dhall.Core                            (Chunks (..), Const (..), normalize,
                                                         Expr (..),
                                                         ReifiedNormalizer (..),
-                                                        denote,
-                                                        internalError,
+                                                        denote, internalError,
                                                         normalizeWith)
 import qualified Dhall.Import
 import           Dhall.JSON                            (Conversion (..),
@@ -140,6 +141,14 @@ exprFromFile "-" =
 exprFromFile path = withFile path ReadMode $
   exprFromText' (takeDirectory path) path <=< Data.Text.IO.hGetContents
 
+exprFromFileNoBakeNormalize
+  :: FilePath
+  -> IO ExprX
+exprFromFileNoBakeNormalize "-" =
+  exprFromTextNoBakeNormalize "." "(stdin)" =<< Data.Text.IO.hGetContents stdin
+exprFromFileNoBakeNormalize path = withFile path ReadMode $
+  exprFromTextNoBakeNormalize (takeDirectory path) path <=< Data.Text.IO.hGetContents
+
 exprFromText :: Text -> IO ExprX
 exprFromText = exprFromText' "." "(string)"
 
@@ -161,6 +170,20 @@ exprFromText' rootDirectory filename text = do
   typeCheck resolved
   pure resolved
 
+exprFromTextNoBakeNormalize
+  :: FilePath
+  -> FilePath
+  -> Text
+  -> IO ExprX
+exprFromTextNoBakeNormalize rootDirectory filename text = do
+  parsedExpression <- case Dhall.Parser.exprFromText filename text of
+    Left  err              -> throwIO err
+    Right parsedExpression -> return parsedExpression
+
+  let status = Dhall.Import.emptyStatus        rootDirectory
+             & Dhall.Import.startingContext .~ startingContext
+
+  normalize <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
 
 typeCheck :: MonadIO m => ExprX -> m ()
 typeCheck expr =
@@ -176,6 +199,10 @@ bakeNormalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
 bakeNormalizer = normalizer
   where
   normalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
+
+  normalizer (App e a)
+    | Just e' <- replaceBuiltinModules e
+    = Just (App e' a)
 
   normalizer (App (Var "Text/toBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     Just (TextLit (Chunks [] (toS . B64.encode . toS $ x)))
@@ -214,6 +241,8 @@ bakeNormalizer = normalizer
 
   anX = Dhall.TypeCheck.X (internalError "absurd")
 
+
+
 startingContext
   :: Dhall.Context.Context ExprX
 startingContext = Dhall.Context.empty
@@ -223,6 +252,7 @@ startingContext = Dhall.Context.empty
                 & Dhall.Context.insert "fromYAML" deserializerType
                 & Dhall.Context.insert "toJSON" serializerType
                 & Dhall.Context.insert "toYAML" serializerType
+                & insertEmbeddedModuleTypes
   where
   textToTextType = Pi "_" Text Text
   fromBase64Type = Pi "_" Text (Optional `App` Text)
