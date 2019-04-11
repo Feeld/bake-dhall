@@ -8,7 +8,7 @@
 module Main (main) where
 
 import           BakeDhall                  (ExprX, eval, evalWithValue,
-                                             exprFromFile, exprFromFileNoBakeNormalize)
+                                             exprFromFile, exprFromFileNoBakeNormalize, exprFromBinary)
 
 import qualified Codec.Archive.Tar          as Tar
 import qualified Codec.Archive.Tar.Entry    as Tar
@@ -96,11 +96,8 @@ evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
       yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
       hPutStrLn outH $ "---\n" <> yaml
 
-exprFromEntry :: MonadIO m => Tar.Entry -> m ExprX
-exprFromEntry entry = do
-  term <- throws . Codec.Serialise.deserialiseOrFail =<< entryBytes entry
-  exprI <- throws $ Dhall.Binary.decodeExpression term
-  either (throwIO . userError) pure $ traverse (const (Left "Import resolution disabled")) exprI
+exprFromEntry :: Tar.Entry -> IO ExprX
+exprFromEntry = exprFromBinary <=< entryBytes
 
 entryBytes :: MonadIO f => Tar.Entry -> f LBS.ByteString
 entryBytes Tar.Entry{entryContent=Tar.NormalFile x _} = pure x
@@ -211,7 +208,3 @@ withInputFileOrStdin fp  f = withFile fp ReadMode f
 withOutputFileOrStdout :: FilePath -> (Handle -> IO a) -> IO a
 withOutputFileOrStdout "-" f = f stdout
 withOutputFileOrStdout fp  f = withFile fp WriteMode f
-
-throws :: (MonadIO m, Exception e) => Either e a -> m a
-throws (Left  e) = throwIO e
-throws (Right a) = pure a

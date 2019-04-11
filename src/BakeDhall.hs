@@ -7,6 +7,7 @@
 
 module BakeDhall (
   ExprX
+, exprFromBinary
 , exprFromFile
 , exprFromFileNoBakeNormalize
 , exprFromText
@@ -22,20 +23,23 @@ import           EmbeddedModules
 import           JsonToDhall                           (defaultConversion,
                                                         dhallFromJSON)
 
+import qualified Codec.Serialise
 import           Control.Lens                          hiding (Const)
 import qualified Control.Monad.Trans.State.Strict      as StrictState
 import           Data.Aeson
 import qualified Data.ByteString.Base64                as B64
+import qualified Data.ByteString.Lazy                  as LBS
 import qualified Data.Text.IO
 import qualified Data.Text.Prettyprint.Doc             as Pretty
 import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
 import           Data.Yaml
 import qualified Dhall.Binary
 import qualified Dhall.Context
-import           Dhall.Core                            (Chunks (..), Const (..), normalize,
+import           Dhall.Core                            (Chunks (..), Const (..),
                                                         Expr (..),
                                                         ReifiedNormalizer (..),
                                                         denote, internalError,
+                                                        normalize,
                                                         normalizeWith)
 import qualified Dhall.Import
 import           Dhall.JSON                            (Conversion (..),
@@ -166,7 +170,8 @@ exprFromText' rootDirectory filename text = do
              & Dhall.Import.normalizer      .~ ReifiedNormalizer (pure . bakeNormalizer)
              & Dhall.Import.startingContext .~ startingContext
 
-  resolved <- normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+
+  resolved <- replaceBuiltinModules . normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
   typeCheck resolved
   pure resolved
 
@@ -176,14 +181,24 @@ exprFromTextNoBakeNormalize
   -> Text
   -> IO ExprX
 exprFromTextNoBakeNormalize rootDirectory filename text = do
+  putStrLn @Text "fuck"
   parsedExpression <- case Dhall.Parser.exprFromText filename text of
     Left  err              -> throwIO err
     Right parsedExpression -> return parsedExpression
+  putStrLn @Text "yeah!"
 
   let status = Dhall.Import.emptyStatus        rootDirectory
              & Dhall.Import.startingContext .~ startingContext
+             & Dhall.Import.cacher          .~ (\_ _ -> pure ())
+             & Dhall.Import.resolver        %~ (\old imp -> normalizeWith (pure . deAnnotate) <$> old imp)
 
-  normalize <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  resolved <- StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  putStrLn @Text "ouuuu yeah"
+  pure (normalize resolved)
+
+deAnnotate :: Expr s a -> Maybe (Expr s a)
+deAnnotate (Annot x _) = Just x
+deAnnotate _ = Nothing
 
 typeCheck :: MonadIO m => ExprX -> m ()
 typeCheck expr =
@@ -199,10 +214,6 @@ bakeNormalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
 bakeNormalizer = normalizer
   where
   normalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
-
-  normalizer (App e a)
-    | Just e' <- replaceBuiltinModules e
-    = Just (App e' a)
 
   normalizer (App (Var "Text/toBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     Just (TextLit (Chunks [] (toS . B64.encode . toS $ x)))
@@ -224,8 +235,7 @@ bakeNormalizer = normalizer
   normalizer (App (App (Var "toYAML") _) expr) =
     serializeValueWith (toS . Data.Yaml.encode) expr
 
-  normalizer _ =
-    Nothing
+  normalizer _ = Nothing
 
   serializeValueWith fun expr =
     let convertedExpression = convertToHomogeneousMaps conversion (const anX <$> expr)
@@ -267,3 +277,14 @@ renderExpr = Pretty.renderStrict . Pretty.layoutPretty opts . Pretty.pretty
   opts =
     Pretty.defaultLayoutOptions
       { Pretty.layoutPageWidth = Pretty.AvailablePerLine 80 1.0 }
+
+exprFromBinary :: LBS.ByteString -> IO ExprX
+exprFromBinary bs = do
+  term <- throws $ Codec.Serialise.deserialiseOrFail bs
+  exprI <- throws (Dhall.Binary.decodeExpression term)
+  exprResolved <- either (throwIO . userError) pure $ traverse (const (Left "Import resolution disabled")) exprI
+  pure . replaceBuiltinModules . normalizeBake  $ exprResolved
+
+throws :: (MonadIO m, Exception e) => Either e a -> m a
+throws (Left  e) = throwIO e
+throws (Right a) = pure a
