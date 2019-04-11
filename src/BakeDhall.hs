@@ -32,7 +32,9 @@ import           Data.Yaml
 import qualified Dhall.Binary
 import qualified Dhall.Context
 import           Dhall.Core                            (Chunks (..), Const (..),
-                                                        Expr (..), denote,
+                                                        Expr (..),
+                                                        ReifiedNormalizer (..),
+                                                        denote,
                                                         internalError,
                                                         normalizeWith)
 import qualified Dhall.Import
@@ -152,11 +154,13 @@ exprFromText' rootDirectory filename text = do
     Left  err              -> throwIO err
     Right parsedExpression -> return parsedExpression
 
-  let status = Dhall.Import.emptyStatus rootDirectory
+  let status = Dhall.Import.emptyStatus        rootDirectory
+             & Dhall.Import.normalizer      .~ ReifiedNormalizer (pure . bakeNormalizer)
+             & Dhall.Import.startingContext .~ startingContext
 
-  resolved <- StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  resolved <- normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
   typeCheck resolved
-  pure $ normalizeBake resolved
+  pure resolved
 
 
 typeCheck :: MonadIO m => ExprX -> m ()
@@ -181,7 +185,10 @@ exprFromTextPure text = do
 
 
 normalizeBake :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a
-normalizeBake = normalizeWith (pure . normalizer)
+normalizeBake = normalizeWith (pure . bakeNormalizer)
+
+bakeNormalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
+bakeNormalizer = normalizer
   where
   normalizer :: Dhall.Binary.ToTerm a => Expr s a -> Maybe (Expr s a)
 
