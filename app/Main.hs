@@ -75,7 +75,8 @@ evaluateTemplate TemplateOptions{outputYamlPath,templateDirPath,jsonConfigPath} 
       hPutStrLn outH $ "---\n" <> Data.Yaml.encode part
 
 extractParts :: Data.Aeson.Value -> [Data.Aeson.Value]
-extractParts = pure
+extractParts (Data.Aeson.Array vs) = toList vs
+extractParts x                     = [x]
 
 evaluateUnpack :: UnpackOptions -> IO ()
 evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
@@ -93,8 +94,9 @@ evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
     cfgValue <- withInputFileOrStdin jsonConfigPath $ \cfgH ->
       either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents cfgH)
     withOutputFileOrStdout outputYamlPath $ \outH -> do
-      yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
-      hPutStrLn outH $ "---\n" <> yaml
+      aesonValue <- evalWithValue schemaExpr cfgValue expr
+      forM_ (extractParts aesonValue) $ \part ->
+        hPutStrLn outH $ "---\n" <> Data.Yaml.encode part
 
 exprFromEntry :: MonadIO m => Tar.Entry -> m ExprX
 exprFromEntry entry = do
