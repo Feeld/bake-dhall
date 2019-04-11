@@ -10,7 +10,6 @@ module BakeDhall (
 , exprFromFile
 , exprFromText
 , exprFromText'
-, exprFromTextPure
 , eval
 , evalWithValue
 , evalTest
@@ -168,20 +167,6 @@ typeCheck expr =
   case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext expr of
     Left  err -> throwIO err
     Right _   -> return ()
-
-exprFromTextPure
-  :: Text
-  -> Either Text ExprX
-exprFromTextPure text = do
-  expression <- case Dhall.Parser.exprFromText "(string)" text of
-    Left  err  -> Left (show err)
-    Right expr -> Right expr
-
-  normal <- normalizeBake
-        <$> traverse (const (Left "Import resolution disabled")) expression
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext normal of
-    Left  err -> Left (show err)
-    Right _   -> Right normal
 
 
 normalizeBake :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a

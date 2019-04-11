@@ -7,20 +7,21 @@
 
 module Main (main) where
 
-import           BakeDhall                  (eval, evalWithValue, exprFromFile,
-                                             exprFromTextPure, renderExpr)
+import           BakeDhall                  (ExprX, eval, evalWithValue,
+                                             exprFromFile)
 
 import qualified Codec.Archive.Tar          as Tar
 import qualified Codec.Archive.Tar.Entry    as Tar
-import qualified Codec.Compression.BZip     as BZip
+import qualified Codec.Compression.Lzma     as Lzma
+import qualified Codec.Serialise
 import           Data.Aeson
 import qualified Data.ByteString.Lazy       as LBS
 import qualified Data.List                  as List
 import qualified Data.Yaml
 import qualified Dhall
+import qualified Dhall.Binary
 import           Options.Applicative.Simple
 import           Protolude
-import           System.Directory           (listDirectory)
 import           System.FilePath
 import           System.IO.Error            (userError)
 
@@ -40,8 +41,8 @@ data UnpackOptions = UnpackOptions
   }
 
 data PackOptions = PackOptions
-  { outputPackagePath    :: FilePath
-  , inputTemplateDirPath :: FilePath
+  { outputPackagePath :: FilePath
+  , templateDirPath   :: FilePath
   }
 
 data TemplateOptions = TemplateOptions
@@ -53,6 +54,9 @@ data TemplateOptions = TemplateOptions
 schemaFilename :: FilePath
 schemaFilename = "Config.dhall"
 
+indexFilename :: FilePath
+indexFilename = "index.dhall"
+
 evaluateCommand :: Command -> IO ()
 evaluateCommand (Template opts) = evaluateTemplate opts
 evaluateCommand Evaluate        = evaluateStdin
@@ -61,70 +65,68 @@ evaluateCommand (Unpack opts)   = evaluateUnpack opts
 
 evaluateTemplate :: TemplateOptions -> IO ()
 evaluateTemplate TemplateOptions{outputYamlPath,templateDirPath,jsonConfigPath} = do
+  let indexPath = templateDirPath </> indexFilename
   schemaExpr <- exprFromFile $ templateDirPath </> schemaFilename
   cfgValue <- withInputFileOrStdin jsonConfigPath $ \inH ->
     either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents inH)
   withOutputFileOrStdout outputYamlPath $ \outH -> do
-    paths <- sort . map (templateDirPath </>) <$> listDirectory templateDirPath
-    forM_ paths $ \pth ->
-      when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
-        hPutStrLn stderr $ "Processing " <> pth
-        yaml <- Data.Yaml.encode
-            <$> (evalWithValue schemaExpr cfgValue =<< exprFromFile pth)
-        hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
+    aesonValue <- evalWithValue schemaExpr cfgValue =<< exprFromFile indexPath
+    forM_ (extractParts aesonValue) $ \part ->
+      hPutStrLn outH $ "---\n" <> Data.Yaml.encode part
+
+extractParts :: Data.Aeson.Value -> [Data.Aeson.Value]
+extractParts = pure
 
 evaluateUnpack :: UnpackOptions -> IO ()
 evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
   withInputFileOrStdin inputPackagePath $ \inH -> do
     eEntries <- Tar.foldEntries (\a -> fmap (a:)) (pure mempty) Left
-              . Tar.read . BZip.decompress
+              . Tar.read . Lzma.decompress
             <$> LBS.hGetContents inH
     entries <- either (throwIO . userError . show) pure eEntries
-    schemaEntry <- maybe (throwIO (userError "Config.yaml not found in archive")) pure
+    schemaEntry <- maybe (throwIO (userError $ schemaFilename <> " not found in archive")) pure
                   (List.find ((==schemaFilename) . Tar.entryPath) entries)
-    schemaExpr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText schemaEntry)
+    indexEntry <- maybe (throwIO (userError $ indexFilename <> " not found in archive")) pure
+                  (List.find ((==indexFilename) . Tar.entryPath) entries)
+    expr <- exprFromEntry indexEntry
+    schemaExpr <- exprFromEntry schemaEntry
     cfgValue <- withInputFileOrStdin jsonConfigPath $ \cfgH ->
       either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents cfgH)
-    withOutputFileOrStdout outputYamlPath $ \outH ->
-      forM_ (sortBy (compare `on` Tar.entryPath) entries) $ \entry -> do
-        let pth = Tar.entryPath entry
-        when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
-          expr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText entry)
-          yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
-          hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
+    withOutputFileOrStdout outputYamlPath $ \outH -> do
+      yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
+      hPutStrLn outH $ "---\n" <> yaml
 
-  where
-  entryText :: Tar.Entry -> IO Text
-  entryText Tar.Entry{entryContent=Tar.NormalFile x _} = pure (toS x)
-  entryText e = throwIO $ userError $ "Expected " <> Tar.entryPath e <> " to be a normal file"
+exprFromEntry :: MonadIO m => Tar.Entry -> m ExprX
+exprFromEntry entry = do
+  term <- throws . Codec.Serialise.deserialiseOrFail =<< entryBytes entry
+  exprI <- throws $ Dhall.Binary.decodeExpression term
+  either (throwIO . userError) pure $ traverse (const (Left "Import resolution disabled")) exprI
+
+entryBytes :: MonadIO f => Tar.Entry -> f LBS.ByteString
+entryBytes Tar.Entry{entryContent=Tar.NormalFile x _} = pure x
+entryBytes e = throwIO $ userError $ "Expected " <> Tar.entryPath e <> " to be a normal file"
 
 evaluatePack :: PackOptions -> IO ()
-evaluatePack PackOptions{outputPackagePath,inputTemplateDirPath} = do
-  paths <- map (inputTemplateDirPath </>) <$> listDirectory inputTemplateDirPath
-  entries <- fmap catMaybes $ forM paths $ \pth ->
-    if isPackablePath schemaFilename (takeFileName pth) then do
-      hPutStrLn stderr $ "Processing " <> pth
-      importedAndNormalized <- exprFromFile pth
-      tarPath <- either (throwIO . userError) pure (Tar.toTarPath False (takeFileName pth))
-      pure $ Just $Tar.fileEntry tarPath (toS (renderExpr importedAndNormalized))
-    else pure Nothing
-  withOutputFileOrStdout outputPackagePath (\h -> LBS.hPutStr h $ BZip.compress $ Tar.write entries)
+evaluatePack PackOptions{outputPackagePath,templateDirPath} = do
+  entries <- forM [indexPath, schemaPath] $ \pth -> do
+    importedAndNormalized <- exprFromFile pth
+    tarPath <- either (throwIO . userError) pure (Tar.toTarPath False (takeFileName pth))
+    pure $ Tar.fileEntry tarPath
+         $ Codec.Serialise.serialise
+         $ Dhall.Binary.encode importedAndNormalized
+  withOutputFileOrStdout outputPackagePath (\h -> LBS.hPutStr h $ Lzma.compressWith compressOptions $ Tar.write entries)
+  where
+  indexPath  = templateDirPath </> indexFilename
+  schemaPath = templateDirPath </> schemaFilename
+  compressOptions = Lzma.defaultCompressParams
+    { Lzma.compressLevelExtreme = True
+    , Lzma.compressLevel = Lzma.CompressionLevel9
+    }
+
 
 evaluateStdin :: IO ()
 evaluateStdin =
   putStrLn . Data.Yaml.encode =<< eval =<< exprFromFile "-"
-
-
-isOuputProducingPath :: FilePath -> FilePath -> Bool
-isOuputProducingPath schemaFile file
-  | schemaFile==file           = False
-isOuputProducingPath _ ('_':_) = False
-isOuputProducingPath _ ('.':_) = False
-isOuputProducingPath _ s       = takeExtension s == ".dhall"
-
-isPackablePath :: FilePath -> FilePath -> Bool
-isPackablePath schemaFile file =
-  schemaFile==file || isOuputProducingPath schemaFile file
 
 
 
@@ -209,3 +211,7 @@ withInputFileOrStdin fp  f = withFile fp ReadMode f
 withOutputFileOrStdout :: FilePath -> (Handle -> IO a) -> IO a
 withOutputFileOrStdout "-" f = f stdout
 withOutputFileOrStdout fp  f = withFile fp WriteMode f
+
+throws :: (MonadIO m, Exception e) => Either e a -> m a
+throws (Left  e) = throwIO e
+throws (Right a) = pure a
