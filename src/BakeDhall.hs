@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE NoImplicitPrelude     #-}
 {-# LANGUAGE OverloadedStrings     #-}
@@ -7,24 +9,32 @@
 
 module BakeDhall (
   ExprX
+, BakeError (..)
 , exprFromFile
 , exprFromText
-, exprFromText'
-, exprFromTextPure
-, eval
-, evalWithValue
-, evalTest
+, exprFromBytes
+, exprFromB64
+, applyExpr
+, evalExpr
+, exprToBytes
+, exprToB64
+, toYamlDocuments
 , renderExpr
 ) where
 
 
-import           JsonToDhall                           (defaultConversion,
+import           JsonToDhall                           (CompileError,
+                                                        defaultConversion,
                                                         dhallFromJSON)
 
+import qualified Codec.Compression.Lzma                as Lzma
+import qualified Codec.Serialise
 import           Control.Lens                          hiding (Const)
+import           Control.Monad.Catch
 import qualified Control.Monad.Trans.State.Strict      as StrictState
 import           Data.Aeson
 import qualified Data.ByteString.Base64                as B64
+import qualified Data.ByteString.Lazy                  as LBS
 import qualified Data.Text.IO
 import qualified Data.Text.Prettyprint.Doc             as Pretty
 import qualified Data.Text.Prettyprint.Doc.Render.Text as Pretty
@@ -34,18 +44,19 @@ import qualified Dhall.Context
 import           Dhall.Core                            (Chunks (..), Const (..),
                                                         Expr (..),
                                                         ReifiedNormalizer (..),
-                                                        denote,
-                                                        internalError,
+                                                        denote, internalError,
                                                         normalizeWith)
 import qualified Dhall.Import
-import           Dhall.JSON                            (Conversion (..),
+import           Dhall.JSON                            (CompileError (..),
+                                                        Conversion (..),
                                                         convertToHomogeneousMaps,
                                                         dhallToJSON, omitEmpty)
 import qualified Dhall.Parser
 import qualified Dhall.TypeCheck
-import           Protolude                             hiding (Const)
+import           GHC.Generics                          (Generic)
+import           Protolude                             hiding (Const, TypeError,
+                                                        catches)
 import           System.FilePath                       (takeDirectory)
-import           System.IO.Error                       (userError)
 
 -- This module exports functions to evaluate dhall expressions with builtin
 -- json/yaml support
@@ -54,134 +65,165 @@ import           System.IO.Error                       (userError)
 -- >>> :set -XOverloadedStrings
 --
 -- Can evaluate a simple expression
--- >>> evalTest "1 + 2"
+-- >>> _evalTest "1 + 2"
 -- 3
 --
 -- Can convert a string to base64
--- >>> evalTest "Text/toBase64 \"foobar\""
+-- >>> _evalTest "Text/toBase64 \"foobar\""
 -- "Zm9vYmFy"
 --
 -- Can decode a well-formed base64 string
--- >>> evalTest "Text/fromBase64 \"Zm9vYmFy\""
+-- >>> _evalTest "Text/fromBase64 \"Zm9vYmFy\""
 -- "foobar"
 --
 -- A non-well-formed base64 string produces a json null
--- >>> evalTest "Text/fromBase64 \"Zm9mFy\""
+-- >>> _evalTest "Text/fromBase64 \"Zm9mFy\""
 -- null
 --
 -- Can encode into json
--- >>> evalTest "toJSON (List Natural) [1 + 2 + 3, 5]"
+-- >>> _evalTest "toJSON (List Natural) [1 + 2 + 3, 5]"
 -- "[6,5]"
 --
 -- Can decode a well-typed json
--- >>> evalTest "fromJSON {name:Text} ./examples/sampleConfig.json as Text"
+-- >>> _evalTest "fromJSON {name:Text} ./examples/sampleConfig.json as Text"
 -- {"name":"Some name"}
 --
 -- A non-well-typed json produces a json null
--- >>> evalTest "fromJSON {name:Natural} ./examples/sampleConfig.json as Text"
+-- >>> _evalTest "fromJSON {name:Natural} ./examples/sampleConfig.json as Text"
 -- null
 --
 -- Can encode into yaml
--- >>> evalTest "toYAML (List Natural) [1 + 2 + 3, 5]"
+-- >>> _evalTest "toYAML (List Natural) [1 + 2 + 3, 5]"
 -- "- 6\n- 5\n"
 --
 -- Can decode a well-typed yaml
--- >>> evalTest "fromYAML (List Natural) \"- 6\\n- 5\\n\""
+-- >>> _evalTest "fromYAML (List Natural) \"- 6\\n- 5\\n\""
 -- [6,5]
 --
 -- A non well-typed yaml produces a json null
--- >>> evalTest "fromYAML (List (List Text)) \"- 6\\n- 5\\n\""
+-- >>> _evalTest "fromYAML (List (List Text)) \"- 6\\n- 5\\n\""
 -- null
 
 
 type ExprX = Expr Dhall.Parser.Src Dhall.TypeCheck.X
 
-evalWithValue
-  :: ExprX
-  -> Value
-  -> ExprX
-  -> IO Value
-evalWithValue cfgTyExpr cfgValue funExpr = do
-  cfgExpr <- case dhallFromJSON defaultConversion cfgTyExpr cfgValue of
-    Right x -> pure x
-    Left e  -> throwIO $ userError $ show e
+data BakeError
+  = ImportResolutionDisabled
+  | DeserialiseFailure Codec.Serialise.DeserialiseFailure
+  | DecodingFailure Dhall.Binary.DecodingFailure
+  | B64DecodeError Text
 
-  let appliedExpr = normalizeBake (funExpr `App` cfgExpr)
+  | JsonToDhallError JsonToDhall.CompileError
+  | DhallToJsonErorr Dhall.JSON.CompileError
 
-  typeCheck appliedExpr
+  | TypeError (Dhall.TypeCheck.TypeError Dhall.Parser.Src Dhall.TypeCheck.X)
+  | ParseError Dhall.Parser.ParseError
+  | MissingImportsError Dhall.Import.MissingImports
+  | MissingFileError Dhall.Import.MissingFile
+  | MissingEnvironmentVariableError Dhall.Import.MissingEnvironmentVariable
+  | CycleError Dhall.Import.Cycle
+  | ReferentiallyOpaqueError Dhall.Import.ReferentiallyOpaque
 
-  let convertedExpression = convertToHomogeneousMaps conversion appliedExpr
-      conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
-
-  case dhallToJSON convertedExpression of
-    Left err -> throwIO err
-    Right v  -> pure (omitEmpty v)
-
-eval :: ExprX -> IO Value
-eval expr = do
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext expr of
-    Left  err -> throwIO err
-    Right _   -> return ()
-
-  let convertedExpression = convertToHomogeneousMaps conversion expr
-      conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
-
-  case dhallToJSON convertedExpression of
-    Left err -> throwIO err
-    Right v  -> pure (omitEmpty v)
-
-evalTest :: Text -> IO ()
-evalTest = putStrLn <=< fmap Data.Aeson.encode . eval <=< exprFromText
+  | NotALambda
+  | NeedsArgument
+  deriving (Show, Generic, Exception)
 
 exprFromFile
   :: FilePath
   -> IO ExprX
 exprFromFile "-" =
-  exprFromText' "." "(stdin)" =<< Data.Text.IO.hGetContents stdin
+  either throwIO pure =<< exprFromText "." "(stdin)" =<< Data.Text.IO.hGetContents stdin
 exprFromFile path = withFile path ReadMode $
-  exprFromText' (takeDirectory path) path <=< Data.Text.IO.hGetContents
+  either throwIO pure <=< exprFromText (takeDirectory path) path <=< Data.Text.IO.hGetContents
 
-exprFromText :: Text -> IO ExprX
-exprFromText = exprFromText' "." "(string)"
 
-exprFromText'
-  :: FilePath
+exprFromText
+  :: MonadIO m
+  => FilePath
   -> FilePath
   -> Text
-  -> IO ExprX
-exprFromText' rootDirectory filename text = do
-  parsedExpression <- case Dhall.Parser.exprFromText filename text of
-    Left  err              -> throwIO err
-    Right parsedExpression -> return parsedExpression
+  -> m (Either BakeError ExprX)
+exprFromText rootDirectory filename text = runExceptT $ do
+  parsedExpression <-
+    ExceptT $ pure
+            $ first ParseError
+            $ Dhall.Parser.exprFromText filename text
 
   let status = Dhall.Import.emptyStatus        rootDirectory
              & Dhall.Import.normalizer      .~ ReifiedNormalizer (pure . bakeNormalizer)
              & Dhall.Import.startingContext .~ startingContext
 
-  resolved <- normalizeBake <$> StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
-  typeCheck resolved
-  pure resolved
+  resolved <-
+    ExceptT $ liftIO
+            $ catchDhallError
+            $ StrictState.evalStateT (Dhall.Import.loadWith parsedExpression) status
+  void $ ExceptT $ pure $ typeCheck resolved
+  pure (normalizeBake resolved)
 
 
-typeCheck :: MonadIO m => ExprX -> m ()
-typeCheck expr =
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext expr of
-    Left  err -> throwIO err
-    Right _   -> return ()
+catchDhallError :: MonadCatch m => m a -> m (Either BakeError a)
+catchDhallError io = (Right <$> io) `catches`
+  [ Handler (pure . Left . ParseError)
+  , Handler (pure . Left . TypeError)
+  , Handler (pure . Left . MissingImportsError)
+  , Handler (pure . Left . MissingFileError)
+  , Handler (pure . Left . MissingEnvironmentVariableError)
+  , Handler (pure . Left . CycleError)
+  , Handler (pure . Left . ReferentiallyOpaqueError)
+  ]
 
-exprFromTextPure
-  :: Text
-  -> Either Text ExprX
-exprFromTextPure text = do
-  expression <- case Dhall.Parser.exprFromText "(string)" text of
-    Left  err  -> Left (show err)
-    Right expr -> Right expr
+exprFromBytes :: ByteString -> Either BakeError ExprX
+exprFromBytes bytes = do
+  term <- first DeserialiseFailure
+       $! Codec.Serialise.deserialiseOrFail
+       $! Lzma.decompress
+       $! toS bytes
+  exprI <- first DecodingFailure $ Dhall.Binary.decodeExpression term
+  traverse (const (Left ImportResolutionDisabled)) exprI
 
-  normal <- normalizeBake
-        <$> traverse (const (Left "Import resolution disabled")) expression
-  case Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext normal of
-    Left  err -> Left (show err)
-    Right _   -> Right normal
+exprFromB64 :: Text -> Either BakeError ExprX
+exprFromB64 = exprFromBytes
+                    <=< first (B64DecodeError . toS)
+                      . B64.decode . toS
+
+exprToBytes :: ExprX -> ByteString
+exprToBytes = toS
+            . Lzma.compressWith compressOptions
+            . Codec.Serialise.serialise
+            . Dhall.Binary.encode
+  where
+  compressOptions = Lzma.defaultCompressParams
+    { Lzma.compressLevelExtreme = True
+    , Lzma.compressLevel = Lzma.CompressionLevel9
+    }
+
+applyExpr :: ExprX -> Value -> Either BakeError Value
+applyExpr lamExpr@(Lam _ tyExpr _) cfgValue = do
+  cfgExpr <- first JsonToDhallError $ dhallFromJSON defaultConversion tyExpr cfgValue
+  evalExpr (lamExpr `App` cfgExpr)
+applyExpr _ _ = Left NotALambda
+
+evalExpr :: ExprX -> Either BakeError Value
+evalExpr (normalizeBake -> Lam{}) = Left NeedsArgument
+evalExpr (normalizeBake -> expr) = do
+  void $ typeCheck expr
+  omitEmpty
+    <$> first DhallToJsonErorr (dhallToJSON $ convertToHomogeneousMaps dhallJsonConversion expr)
+
+dhallJsonConversion :: Conversion
+dhallJsonConversion = Dhall.JSON.Conversion "mapKey" "mapValue"
+
+-- | Encodes an 'ExprX' as base64 text
+--
+-- >>> Right expr <- exprFromText "." "(string)" "{ foo=2, bar=[\"a\",\"b\"]}"
+-- >>> either (const (pure ())) putStrLn (fmap renderExpr $ exprFromB64 $ exprToB64 expr)
+-- { bar = [ "a", "b" ], foo = 2 }
+exprToB64 :: ExprX -> Text
+exprToB64 = toS . B64.encode . toS . exprToBytes
+
+
+typeCheck :: ExprX -> Either BakeError (Expr Dhall.Parser.Src Dhall.TypeCheck.X)
+typeCheck = first TypeError . Dhall.TypeCheck.typeWith @Dhall.Parser.Src startingContext
 
 
 normalizeBake :: Dhall.Binary.ToTerm a => Expr s a -> Expr t a
@@ -216,8 +258,7 @@ bakeNormalizer = normalizer
     Nothing
 
   serializeValueWith fun expr =
-    let convertedExpression = convertToHomogeneousMaps conversion (const anX <$> expr)
-        conversion = Dhall.JSON.Conversion "mapKey" "mapValue"
+    let convertedExpression = convertToHomogeneousMaps dhallJsonConversion (const anX <$> expr)
     in case dhallToJSON convertedExpression of
       Left _  -> Nothing
       Right v -> Just (TextLit (Chunks [] (fun (omitEmpty v))))
@@ -244,7 +285,6 @@ startingContext = Dhall.Context.empty
   deserializerType = Pi "x" (Const Type) (Pi "_" Text (Optional `App` Var "x"))
   serializerType = Pi "x" (Const Type) (Pi "_" (Var "x") Text)
 
-
 renderExpr :: ExprX -> Text
 renderExpr = Pretty.renderStrict . Pretty.layoutPretty opts . Pretty.pretty
   where
@@ -252,3 +292,15 @@ renderExpr = Pretty.renderStrict . Pretty.layoutPretty opts . Pretty.pretty
   opts =
     Pretty.defaultLayoutOptions
       { Pretty.layoutPageWidth = Pretty.AvailablePerLine 80 1.0 }
+
+toYamlDocuments :: Value -> LBS.ByteString
+toYamlDocuments (Array vs) = LBS.fromChunks $ map (\p -> "---\n"<>Data.Yaml.encode p) $ toList vs
+toYamlDocuments v = toS $ Data.Yaml.encode v
+
+-- | This function is for doctests.
+_evalTest :: Text -> IO ()
+_evalTest text = do
+  expr <- either throwIO pure =<< exprFromText "." "(string)" text
+  case evalExpr expr of
+    Right v  -> putStrLn (Data.Aeson.encode v)
+    Left err -> print err

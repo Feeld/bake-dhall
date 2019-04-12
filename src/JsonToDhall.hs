@@ -1,4 +1,8 @@
-{- Based on  https://github.com/antislava/dhall-haskell -}
+{- Adapted from the awesome work on the json-to-dhall branch from
+ - https://github.com/antislava/dhall-haskell.
+ -
+ - Vendored ghere until it is merged into Dhall and the functionality exposed as a library
+ -}
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE LambdaCase          #-}

@@ -1,0 +1,4 @@
+Bake-Dhall is a tool to evaluate Dhall expressions which supports evaluating a
+single argument lambda if the argument can be converted from a JSON
+
+TBD

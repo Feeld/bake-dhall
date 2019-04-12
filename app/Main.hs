@@ -3,25 +3,22 @@
 {-# LANGUAGE NoImplicitPrelude     #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE TypeApplications      #-}
 
 module Main (main) where
 
-import           BakeDhall                  (eval, evalWithValue, exprFromFile,
-                                             exprFromTextPure, renderExpr)
+import           BakeDhall                  (ExprX, applyExpr, evalExpr,
+                                             exprFromBytes, exprFromFile,
+                                             exprToBytes, toYamlDocuments)
 
-import qualified Codec.Archive.Tar          as Tar
-import qualified Codec.Archive.Tar.Entry    as Tar
-import qualified Codec.Compression.BZip     as BZip
 import           Data.Aeson
+import qualified Data.ByteString            as BS
 import qualified Data.ByteString.Lazy       as LBS
-import qualified Data.List                  as List
-import qualified Data.Yaml
+import           Data.FileEmbed             (embedStringFile)
 import qualified Dhall
 import           Options.Applicative.Simple
 import           Protolude
-import           System.Directory           (listDirectory)
-import           System.FilePath
 import           System.IO.Error            (userError)
 
 main :: IO ()
@@ -30,103 +27,24 @@ main = Dhall.detailed $ evaluateCommand =<< parseCommand
 data Command
   = Pack   PackOptions
   | Unpack   UnpackOptions
-  | Template TemplateOptions
-  | Evaluate
+  | Evaluate EvaluateOptions
 
 data UnpackOptions = UnpackOptions
   { outputYamlPath   :: FilePath
   , inputPackagePath :: FilePath
-  , jsonConfigPath   :: FilePath
+  , jsonConfigPath   :: Maybe FilePath
   }
 
 data PackOptions = PackOptions
-  { outputPackagePath    :: FilePath
-  , inputTemplateDirPath :: FilePath
+  { outputPackagePath :: FilePath
+  , expressionPath    :: FilePath
   }
 
-data TemplateOptions = TemplateOptions
-  { outputYamlPath  :: FilePath
-  , templateDirPath :: FilePath
-  , jsonConfigPath  :: FilePath
+data EvaluateOptions = EvaluateOptions
+  { outputYamlPath :: FilePath
+  , expressionPath :: FilePath
+  , jsonConfigPath :: Maybe FilePath
   }
-
-schemaFilename :: FilePath
-schemaFilename = "Config.dhall"
-
-evaluateCommand :: Command -> IO ()
-evaluateCommand (Template opts) = evaluateTemplate opts
-evaluateCommand Evaluate        = evaluateStdin
-evaluateCommand (Pack opts)     = evaluatePack opts
-evaluateCommand (Unpack opts)   = evaluateUnpack opts
-
-evaluateTemplate :: TemplateOptions -> IO ()
-evaluateTemplate TemplateOptions{outputYamlPath,templateDirPath,jsonConfigPath} = do
-  schemaExpr <- exprFromFile $ templateDirPath </> schemaFilename
-  cfgValue <- withInputFileOrStdin jsonConfigPath $ \inH ->
-    either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents inH)
-  withOutputFileOrStdout outputYamlPath $ \outH -> do
-    paths <- sort . map (templateDirPath </>) <$> listDirectory templateDirPath
-    forM_ paths $ \pth ->
-      when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
-        hPutStrLn stderr $ "Processing " <> pth
-        yaml <- Data.Yaml.encode
-            <$> (evalWithValue schemaExpr cfgValue =<< exprFromFile pth)
-        hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
-
-evaluateUnpack :: UnpackOptions -> IO ()
-evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
-  withInputFileOrStdin inputPackagePath $ \inH -> do
-    eEntries <- Tar.foldEntries (\a -> fmap (a:)) (pure mempty) Left
-              . Tar.read . BZip.decompress
-            <$> LBS.hGetContents inH
-    entries <- either (throwIO . userError . show) pure eEntries
-    schemaEntry <- maybe (throwIO (userError "Config.yaml not found in archive")) pure
-                  (List.find ((==schemaFilename) . Tar.entryPath) entries)
-    schemaExpr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText schemaEntry)
-    cfgValue <- withInputFileOrStdin jsonConfigPath $ \cfgH ->
-      either (throwIO . userError) pure =<< (eitherDecode @Value . toS <$> LBS.hGetContents cfgH)
-    withOutputFileOrStdout outputYamlPath $ \outH ->
-      forM_ (sortBy (compare `on` Tar.entryPath) entries) $ \entry -> do
-        let pth = Tar.entryPath entry
-        when (isOuputProducingPath schemaFilename (takeFileName pth)) $ do
-          expr <- either (throwIO . userError . toS) pure =<< (exprFromTextPure <$> entryText entry)
-          yaml <- Data.Yaml.encode <$> evalWithValue schemaExpr cfgValue expr
-          hPutStrLn outH $ "---\n# Source: " <> toS (takeFileName pth) <> "\n" <> yaml
-
-  where
-  entryText :: Tar.Entry -> IO Text
-  entryText Tar.Entry{entryContent=Tar.NormalFile x _} = pure (toS x)
-  entryText e = throwIO $ userError $ "Expected " <> Tar.entryPath e <> " to be a normal file"
-
-evaluatePack :: PackOptions -> IO ()
-evaluatePack PackOptions{outputPackagePath,inputTemplateDirPath} = do
-  paths <- map (inputTemplateDirPath </>) <$> listDirectory inputTemplateDirPath
-  entries <- fmap catMaybes $ forM paths $ \pth ->
-    if isPackablePath schemaFilename (takeFileName pth) then do
-      hPutStrLn stderr $ "Processing " <> pth
-      importedAndNormalized <- exprFromFile pth
-      tarPath <- either (throwIO . userError) pure (Tar.toTarPath False (takeFileName pth))
-      pure $ Just $Tar.fileEntry tarPath (toS (renderExpr importedAndNormalized))
-    else pure Nothing
-  withOutputFileOrStdout outputPackagePath (\h -> LBS.hPutStr h $ BZip.compress $ Tar.write entries)
-
-evaluateStdin :: IO ()
-evaluateStdin =
-  putStrLn . Data.Yaml.encode =<< eval =<< exprFromFile "-"
-
-
-isOuputProducingPath :: FilePath -> FilePath -> Bool
-isOuputProducingPath schemaFile file
-  | schemaFile==file           = False
-isOuputProducingPath _ ('_':_) = False
-isOuputProducingPath _ ('.':_) = False
-isOuputProducingPath _ s       = takeExtension s == ".dhall"
-
-isPackablePath :: FilePath -> FilePath -> Bool
-isPackablePath schemaFile file =
-  schemaFile==file || isOuputProducingPath schemaFile file
-
-
 
 
 parseCommand :: IO Command
@@ -134,73 +52,116 @@ parseCommand =
   fmap snd $ simpleOptions "0.0.1" headerText description (pure ()) $ do
     addCommand
       "unpack"
-      "Evaluate a packaged dhall template"
+      "Apply a json argument to a binary serialized dhall function"
       Unpack
-      ( UnpackOptions
-        <$> outputYamlOption
-        <*> inputPackageOption
-        <*> jsonConfigOption
-      )
+      unpackOptions
     addCommand
       "pack"
-      "Pack a dhall template"
+      "Resolve all imports, normalize and serialize a dhall function into a binary archive"
       Pack
-      ( PackOptions
-        <$>  strOption
-          (  help "Output archive file"
-          <> long "output"
-          <> short 'o'
-          )
-        <*> inputTemplateOption
-      )
+      packOtions
     addCommand
-      "template"
-      "Evaluate a dhall template dir"
-      Template
-      templateOptions
-    addCommand
-      "eval"
-      "Evaluate stdin"
-      (const Evaluate)
-      (pure ())
+      "evaluate"
+      "Apply a json argument to a dhall function"
+      Evaluate
+      evaluateOptions
   where
   headerText = "bake-dhall"
-  description = "describe me"
-  templateOptions =
-    TemplateOptions
+  description = $(embedStringFile "app/description.txt")
+
+  evaluateOptions =
+    EvaluateOptions
       <$> outputYamlOption
-      <*> inputTemplateOption
+      <*> inputExpressionOption
       <*> jsonConfigOption
-  inputTemplateOption =
+
+  packOtions =
+    PackOptions
+      <$> outputArchiveOption
+      <*> inputExpressionOption
+
+  unpackOptions =
+    UnpackOptions
+      <$> outputYamlOption
+      <*> inputPackageOption
+      <*> jsonConfigOption
+
+  inputExpressionOption =
     strOption
-      (  help "Input template directory"
-      <> long "template"
-      <> short 't'
-      <> value "."
-      <> showDefault
-      )
-  inputPackageOption =
-    strOption
-      (  help "Input package path"
+      (  help "Input expression path ('-' for stdin)"
       <> long "input"
       <> short 'i'
       <> value "-"
       <> showDefault
       )
+
+  inputPackageOption =
+    strOption
+      (  help "Input package path ('-' for stdin)"
+      <> long "input"
+      <> short 'i'
+      <> value "-"
+      <> showDefault
+      )
+
   outputYamlOption =
     strOption
-      (  help "Output yaml file"
+      (  help "Output yaml file ('-' for stdin)"
       <> long "output"
       <> short 'o'
       <> value "-"
       <> showDefault
       )
-  jsonConfigOption =
+
+  outputArchiveOption =
     strOption
-      (  help "Input json config"
+      (  help "Output archive file"
+      <> long "output"
+      <> short 'o'
+      )
+
+  jsonConfigOption = optional $
+    strOption
+      (  help "Input json argument"
       <> long "config"
       <> short 'c'
       )
+
+
+evaluateCommand :: Command -> IO ()
+evaluateCommand (Evaluate opts) = evaluateEvaluate opts
+evaluateCommand (Pack opts)     = evaluatePack opts
+evaluateCommand (Unpack opts)   = evaluateUnpack opts
+
+evaluateEvaluate :: EvaluateOptions -> IO ()
+evaluateEvaluate EvaluateOptions{outputYamlPath,expressionPath,jsonConfigPath} =
+  applyOrEval jsonConfigPath outputYamlPath =<< exprFromFile expressionPath
+
+evaluatePack :: PackOptions -> IO ()
+evaluatePack PackOptions{outputPackagePath,expressionPath} = do
+  bytes <- exprToBytes <$> exprFromFile expressionPath
+  withOutputFileOrStdout outputPackagePath (`BS.hPutStr` bytes)
+
+evaluateUnpack :: UnpackOptions -> IO ()
+evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
+  withInputFileOrStdin inputPackagePath $ \inH -> do
+    eExpr  <- exprFromBytes <$> BS.hGetContents inH
+    case eExpr of
+      Right ex -> applyOrEval jsonConfigPath outputYamlPath ex
+      Left err -> throwIO err
+
+
+applyOrEval :: Maybe FilePath -> FilePath -> ExprX -> IO ()
+applyOrEval (Just jsonConfigPath) outputYamlPath expr =
+  withInputFileOrStdin jsonConfigPath $ \cfgH ->
+  withOutputFileOrStdout outputYamlPath $ \outH -> do
+    cfgValue <- either (throwIO . userError) pure =<< (eitherDecode @Value <$> LBS.hGetContents cfgH)
+    jValue <- either throwIO pure (applyExpr expr cfgValue)
+    hPutStrLn outH $ toYamlDocuments jValue
+applyOrEval Nothing outputYamlPath expr =
+  withOutputFileOrStdout outputYamlPath $ \outH -> do
+    jValue <- either throwIO pure (evalExpr expr)
+    hPutStrLn outH $ toYamlDocuments jValue
 
 withInputFileOrStdin :: FilePath -> (Handle -> IO a) -> IO a
 withInputFileOrStdin "-" f = f stdin
