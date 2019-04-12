@@ -1,24 +1,38 @@
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE NamedFieldPuns        #-}
-{-# LANGUAGE NoImplicitPrelude     #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TemplateHaskell       #-}
-{-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE DeriveAnyClass             #-}
+{-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE DerivingStrategies         #-}
+{-# LANGUAGE DuplicateRecordFields      #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE NamedFieldPuns             #-}
+{-# LANGUAGE NoImplicitPrelude          #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE TypeOperators              #-}
 
 module Main (main) where
 
-import           BakeDhall                  (ExprX, applyExpr, evalExpr,
+import           BakeDhall                  (BakeError, ExprX, applyExpr,
+                                             evalExpr, exprFromB64,
                                              exprFromBytes, exprFromFile,
                                              exprToBytes, toYamlDocuments)
 
 import           Data.Aeson
 import qualified Data.ByteString            as BS
+import qualified Data.ByteString.Base64     as B64
 import qualified Data.ByteString.Lazy       as LBS
 import           Data.FileEmbed             (embedStringFile)
 import qualified Dhall
-import           Options.Applicative.Simple
+import qualified Network.Wai.Handler.Warp   as Warp
+import           Options.Applicative.Simple hiding (argument)
+import qualified Prelude
 import           Protolude
+import           Servant
+import           System.Envy                hiding ((.=))
 import           System.IO.Error            (userError)
 
 main :: IO ()
@@ -28,6 +42,7 @@ data Command
   = Pack   PackOptions
   | Unpack   UnpackOptions
   | Evaluate EvaluateOptions
+  | Serve
 
 data UnpackOptions = UnpackOptions
   { outputYamlPath   :: FilePath
@@ -65,6 +80,11 @@ parseCommand =
       "Apply a json argument to a dhall function"
       Evaluate
       evaluateOptions
+    addCommand
+      "serve"
+      "Launch an HTTP serve which evaluates packed expressions"
+      (const Serve)
+      (pure ())
   where
   headerText = "bake-dhall"
   description = $(embedStringFile "app/description.txt")
@@ -132,6 +152,7 @@ evaluateCommand :: Command -> IO ()
 evaluateCommand (Evaluate opts) = evaluateEvaluate opts
 evaluateCommand (Pack opts)     = evaluatePack opts
 evaluateCommand (Unpack opts)   = evaluateUnpack opts
+evaluateCommand Serve           = startServer
 
 evaluateEvaluate :: EvaluateOptions -> IO ()
 evaluateEvaluate EvaluateOptions{outputYamlPath,expressionPath,jsonConfigPath} =
@@ -149,6 +170,7 @@ evaluateUnpack UnpackOptions{outputYamlPath,inputPackagePath,jsonConfigPath} =
     case eExpr of
       Right ex -> applyOrEval jsonConfigPath outputYamlPath ex
       Left err -> throwIO err
+
 
 
 applyOrEval :: Maybe FilePath -> FilePath -> ExprX -> IO ()
@@ -170,3 +192,77 @@ withInputFileOrStdin fp  f = withFile fp ReadMode f
 withOutputFileOrStdout :: FilePath -> (Handle -> IO a) -> IO a
 withOutputFileOrStdout "-" f = f stdout
 withOutputFileOrStdout fp  f = withFile fp WriteMode f
+
+
+
+
+--
+-- Web service stuff
+--
+
+type EvaluatePackageApi =
+     ReqBody '[JSON]                Request
+  :> Post    '[JSON, YamlDocuments] Manifest
+
+data YamlDocuments
+
+data Request = Request
+  { expression :: Base64Expr
+  , argument   :: Maybe Value
+  , token      :: AccessToken
+  } deriving (Generic, FromJSON)
+
+newtype Manifest = Manifest LBS.ByteString
+
+instance ToJSON Manifest where
+  toJSON (Manifest m) = object [ "manifest" .= toS @_ @Text (B64.encode (toS m)) ]
+
+instance MimeRender YamlDocuments Manifest where
+  mimeRender _ (Manifest lbs) = lbs
+
+instance Accept YamlDocuments where
+  contentType _ = "application/x-yaml"
+
+
+newtype AccessToken = AccessToken Text
+  deriving newtype (Eq, FromJSON)
+
+instance FromEnv AccessToken where
+  fromEnv = AccessToken . toS <$> env @Prelude.String "SECRET_TOKEN"
+
+
+newtype Base64Expr = Base64Expr ExprX
+
+instance FromJSON Base64Expr where
+  parseJSON = withText "Base64Expr" (either (Prelude.fail . show) (pure . Base64Expr) . exprFromB64)
+
+newtype Port = Port Warp.Port
+
+instance FromEnv Port where
+  fromEnv = do
+    port <- env "PORT"
+    case readMaybe port of
+      Just p  -> pure (Port (fromInteger p))
+      Nothing -> Prelude.fail "PORT must be a number"
+
+evaluatePackageServer
+  :: MonadError ServantErr m
+  => AccessToken
+  -> ServerT EvaluatePackageApi m
+evaluatePackageServer secret Request{expression=Base64Expr expr,argument,token}
+  | secret /= token = throwError $ err403 { errBody = "Invalid access token" }
+  | otherwise = either (\e -> throwError $ err422 { errBody = show e }) pure (createManifest expr argument)
+
+createManifest :: ExprX -> Maybe Value -> Either BakeError Manifest
+createManifest expr (Just arg) = Manifest . toYamlDocuments <$> applyExpr expr arg
+createManifest expr Nothing    = Manifest . toYamlDocuments <$> evalExpr expr
+
+startServer :: IO ()
+startServer = do
+  Port port <- either (throwIO . userError) pure =<< decodeEnv
+  secret <- either (throwIO . userError) pure =<< decodeEnv
+  putStrLn @Text $ "Listening on port " <> show port
+  Warp.run port (mkApplication secret)
+
+mkApplication :: AccessToken -> Application
+mkApplication = serve (Proxy @EvaluatePackageApi) . evaluatePackageServer
