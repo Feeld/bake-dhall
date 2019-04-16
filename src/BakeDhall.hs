@@ -66,43 +66,43 @@ import           System.FilePath                       (takeDirectory)
 --
 -- Can evaluate a simple expression
 -- >>> _evalTest "1 + 2"
--- 3
+-- Just "3"
 --
 -- Can convert a string to base64
 -- >>> _evalTest "Text/toBase64 \"foobar\""
--- "Zm9vYmFy"
+-- Just "\"Zm9vYmFy\""
 --
 -- Can decode a well-formed base64 string
 -- >>> _evalTest "Text/fromBase64 \"Zm9vYmFy\""
--- "foobar"
+-- Just "\"foobar\""
 --
--- A non-well-formed base64 string produces a json null
+-- A non-well-formed base64 string produces a type error
 -- >>> _evalTest "Text/fromBase64 \"Zm9mFy\""
--- null
+-- Nothing
 --
 -- Can encode into json
 -- >>> _evalTest "toJSON (List Natural) [1 + 2 + 3, 5]"
--- "[6,5]"
+-- Just "\"[6,5]\""
 --
 -- Can decode a well-typed json
 -- >>> _evalTest "fromJSON {name:Text} ./examples/sampleConfig.json as Text"
--- {"name":"Some name"}
+-- Just "{\"name\":\"Some name\"}"
 --
--- A non-well-typed json produces a json null
+-- A non-well-typed json produces a type error
 -- >>> _evalTest "fromJSON {name:Natural} ./examples/sampleConfig.json as Text"
--- null
+-- Nothing
 --
 -- Can encode into yaml
 -- >>> _evalTest "toYAML (List Natural) [1 + 2 + 3, 5]"
--- "- 6\n- 5\n"
+-- Just "\"- 6\\n- 5\\n\""
 --
 -- Can decode a well-typed yaml
 -- >>> _evalTest "fromYAML (List Natural) \"- 6\\n- 5\\n\""
--- [6,5]
+-- Just "[6,5]"
 --
--- A non well-typed yaml produces a json null
+-- A non well-typed yaml produces a type error
 -- >>> _evalTest "fromYAML (List (List Text)) \"- 6\\n- 5\\n\""
--- null
+-- Nothing
 
 
 type ExprX = Expr Dhall.Parser.Src Dhall.TypeCheck.X
@@ -239,8 +239,8 @@ bakeNormalizer = normalizer
 
   normalizer (App (Var "Text/fromBase64") (normalizeBake -> TextLit (Chunks [] x))) =
     case B64.decode (toS x) of
-      Right s -> Just (Some (TextLit (Chunks [] (toS s))))
-      Left _  -> Just (None `App` Text)
+      Right s -> Just (TextLit (Chunks [] (toS s)))
+      Left _  -> Nothing
 
   normalizer (App (App (Var "fromJSON") tyExpr) (normalizeBake -> TextLit (Chunks [] str))) =
     exprFromValue tyExpr =<< Data.Aeson.decode (toS str)
@@ -265,8 +265,8 @@ bakeNormalizer = normalizer
 
   exprFromValue tyExpr value =
     case dhallFromJSON defaultConversion (const anX <$> denote tyExpr) value of
-      Right x -> Just (Dhall.TypeCheck.absurd <$> denote (Some x))
-      Left _  -> Just (None `App` tyExpr)
+      Right x -> Just (Dhall.TypeCheck.absurd <$> denote x)
+      Left _  -> Nothing
 
   anX = Dhall.TypeCheck.X (internalError "absurd")
 
@@ -282,7 +282,7 @@ startingContext = Dhall.Context.empty
   where
   textToTextType = Pi "_" Text Text
   fromBase64Type = Pi "_" Text (Optional `App` Text)
-  deserializerType = Pi "x" (Const Type) (Pi "_" Text (Optional `App` Var "x"))
+  deserializerType = Pi "x" (Const Type) (Pi "_" Text (Var "x"))
   serializerType = Pi "x" (Const Type) (Pi "_" (Var "x") Text)
 
 renderExpr :: ExprX -> Text
@@ -298,9 +298,9 @@ toYamlDocuments (Array vs) = LBS.fromChunks $ map (\p -> "---\n"<>Data.Yaml.enco
 toYamlDocuments v = toS $ Data.Yaml.encode v
 
 -- | This function is for doctests.
-_evalTest :: Text -> IO ()
+_evalTest :: Text -> IO (Maybe Text)
 _evalTest text = do
   expr <- either throwIO pure =<< exprFromText "." "(string)" text
   case evalExpr expr of
-    Right v  -> putStrLn (Data.Aeson.encode v)
-    Left err -> print err
+    Right v  -> pure (Just (toS (Data.Aeson.encode v)))
+    Left _ -> pure Nothing
