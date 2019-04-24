@@ -50,7 +50,6 @@ jobs:
 
             echo "Signing local cache ..."
             nix sign-paths -v --store "file://$CACHE" -k $KEYFILE --all
-            nix/scripts/cache nix/cache.nix
       - save_cache:
           key: v1-nix-cache-{{ .Revision }}
           paths:
