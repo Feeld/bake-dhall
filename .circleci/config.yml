@@ -31,23 +31,6 @@ jobs:
             hash=$(echo -n ${CIRCLE_SHA1} | cut -c1-6)
             ln $EXECUTABLE ${WORKSPACE_DIR}/bake-dhall-${hash}
       - run:
-          name: Build, test and create docker image
-          command: |
-            set -u
-            IMAGE_NAME="fld-production/bake-dhall"
-            IMAGE_TAG=$CIRCLE_SHA1
-            IMAGE_NAME_AND_TAG="${IMAGE_NAME}:${IMAGE_TAG}"
-
-            echo "Creating docker image \"${IMAGE_NAME_AND_TAG}\""
-            IMAGE_FILE=$(nix-build nix/docker.nix --no-out-link \
-              --argstr tag $IMAGE_TAG \
-              --argstr name $IMAGE_NAME \
-              )
-            echo "Compressed image size: $(ls -lh $IMAGE_FILE | cut -f5 -d' ')"
-
-            mkdir -p ${WORKSPACE_DIR}
-            ln $IMAGE_FILE ${WORKSPACE_DIR}/docker-image.tar.gz
-      - run:
           name: Archive and sign build artifacts.
           command: |
             export KEYFILE=/dev/shm/pk
@@ -72,6 +55,24 @@ jobs:
           key: v1-nix-cache-{{ .Revision }}
           paths:
             - /src/.nix-cache
+            - /src/.cache
+      - run:
+          name: Build, test and create docker image
+          command: |
+            set -u
+            IMAGE_NAME="fld-production/bake-dhall"
+            IMAGE_TAG=$CIRCLE_SHA1
+            IMAGE_NAME_AND_TAG="${IMAGE_NAME}:${IMAGE_TAG}"
+
+            echo "Creating docker image \"${IMAGE_NAME_AND_TAG}\""
+            IMAGE_FILE=$(nix-build nix/docker.nix --no-out-link \
+              --argstr tag $IMAGE_TAG \
+              --argstr name $IMAGE_NAME \
+              )
+            echo "Compressed image size: $(ls -lh $IMAGE_FILE | cut -f5 -d' ')"
+
+            mkdir -p ${WORKSPACE_DIR}
+            ln $IMAGE_FILE ${WORKSPACE_DIR}/docker-image.tar.gz
 
       - store_artifacts:
           path: *WORKSPACE_DIR

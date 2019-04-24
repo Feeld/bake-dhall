@@ -1,7 +1,7 @@
 { tag ? "latest"
 , name ? "fld-production/bake-dhall"
 , port ? 8080
-, pkgs ? import ../. {}
+, pkgs ? import ./. {}
 }:
 let
   suExec = pkgs.pkgsMusl.su-exec.overrideAttrs(o:{CFLAGS="--static";});
