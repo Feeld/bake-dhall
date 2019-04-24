@@ -1,5 +1,7 @@
 # bake-dhall
 
+[![CircleCI](https://circleci.com/gh/Feeld/bake-dhall.svg?style=svg)](https://circleci.com/gh/Feeld/bake-dhall)
+
 Evaluate a template dir:
 
 ```sh
