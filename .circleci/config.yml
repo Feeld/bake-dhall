@@ -1,0 +1,87 @@
+version: 2.1
+
+# Used to pass data between jobs.
+# https://circleci.com/docs/2.0/configuration-reference/#persist_to_workspace
+# Must be absolute path or relative path from working_directory.
+WORKSPACE_DIR: &WORKSPACE_DIR /tmp/workspace
+
+jobs:
+  build:
+    docker:
+      - image: avalverde/feeld-circleci-nix
+
+    working_directory: /src
+
+    environment:
+      WORKSPACE_DIR: *WORKSPACE_DIR
+
+    steps:
+      - checkout
+      - restore_cache:
+          key: v1-nix-cache
+      - run:
+          name: Build, test and create linux x86-64 executable
+          command: |
+            set -u
+
+            EXECUTABLE=$(nix-build nix -A bake-dhall --no-out-link)
+            echo "Executable size: $(ls -lh $EXECUTABLE | cut -f5 -d' ')"
+
+            mkdir -p ${WORKSPACE_DIR}
+            hash=$(echo -n ${CIRCLE_SHA1} | cut -c1-6)
+            ln $EXECUTABLE ${WORKSPACE_DIR}/bake-dhall-${hash}
+      - run:
+          name: Build, test and create docker image
+          command: |
+            set -u
+            IMAGE_NAME="fld-production/bake-dhall"
+            IMAGE_TAG=$CIRCLE_SHA1
+            IMAGE_NAME_AND_TAG="${IMAGE_NAME}:${IMAGE_TAG}"
+
+            echo "Creating docker image \"${IMAGE_NAME_AND_TAG}\""
+            IMAGE_FILE=$(nix-build nix/docker.nix --no-out-link \
+              --argstr tag $IMAGE_TAG \
+              --argstr name $IMAGE_NAME \
+              )
+            echo "Compressed image size: $(ls -lh $IMAGE_FILE | cut -f5 -d' ')"
+
+            mkdir -p ${WORKSPACE_DIR}
+            ln $IMAGE_FILE ${WORKSPACE_DIR}/docker-image.tar.gz
+      - run:
+          name: Archive and sign build artifacts.
+          command: |
+            export KEYFILE=/dev/shm/pk
+            (umask 0077 && echo ${NIX_PRIVATE_KEY} > $KEYFILE)
+
+            NIXOPTS="nix -A bake-dhall"
+            CACHE=/src/.nix-cache
+
+            echo "Building..."
+            out=$(nix-build --no-out-link $NIXOPTS)
+
+            echo "Copying to local cache ..."
+            # We instantiate the derivation so we get all build time dependencies too
+            derivation=$(nix-instantiate $NIXOPTS)
+            nix-store -qR --include-outputs $derivation \
+              | xargs nix copy --to "file://$CACHE"
+
+            echo "Signing local cache ..."
+            nix sign-paths -v --store "file://$CACHE" -k $KEYFILE --all
+            nix/scripts/cache nix/cache.nix
+      - save_cache:
+          key: v1-nix-cache-{{ .Revision }}
+          paths:
+            - /src/.nix-cache
+
+      - store_artifacts:
+          path: *WORKSPACE_DIR
+
+      - persist_to_workspace:
+          root: *WORKSPACE_DIR
+          paths: .
+
+workflows:
+  version: 2
+  build_deploy:
+    jobs:
+      - build
