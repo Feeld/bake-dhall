@@ -24,7 +24,7 @@ jobs:
           command: |
             set -u
 
-            EXECUTABLE=$(nix-build nix -A bake-dhall --no-out-link)
+            EXECUTABLE="$(nix-build nix -A bake-dhall --no-out-link)/bin/bake-dhall"
             echo "Executable size: $(ls -lh $EXECUTABLE | cut -f5 -d' ')"
 
             mkdir -p ${WORKSPACE_DIR}
